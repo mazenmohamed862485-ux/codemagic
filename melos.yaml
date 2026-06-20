@@ -1,8 +1,9 @@
 name: tobest_monorepo
 
 packages:
-  - apps/**
-  - packages/**
+  - apps/tobest
+  - apps/management
+  - packages/shared
 
 command:
   bootstrap:

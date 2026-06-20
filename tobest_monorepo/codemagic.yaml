@@ -1,0 +1,293 @@
+# =============================================================================
+# Codemagic CI/CD — TO Best Flutter Monorepo
+# =============================================================================
+# Replaces the previous GitHub Actions setup:
+#   .github/workflows/ci.yml            -> tobest-ci
+#   .github/workflows/cd_tobest.yml      -> tobest-android-release
+#   .github/workflows/cd_management.yml  -> management-android-release
+#
+# Full setup instructions (env var groups, keystores, GitHub token, etc.)
+# are documented in CODEMAGIC_MIGRATION.md at the repo root.
+# =============================================================================
+
+workflows:
+
+  # ---------------------------------------------------------------------------
+  # CI — Analyze & Test
+  # Runs melos bootstrap -> generate -> analyze -> format -> test for the
+  # whole workspace (both apps + the shared package), on every push/PR to
+  # main or develop. Equivalent to the old ci.yml, consolidated into a single
+  # job since Codemagic workflows run sequentially on one machine anyway.
+  # ---------------------------------------------------------------------------
+  tobest-ci:
+    name: CI — Analyze & Test
+    instance_type: linux_x2 # Pure Dart/Android workload, no macOS needed.
+    max_build_duration: 30
+    environment:
+      flutter: 3.24.5
+      java: 17
+      groups:
+        - codecov_credentials # optional — see CODEMAGIC_MIGRATION.md
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+        - pattern: develop
+          include: true
+          source: true
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/.gradle/caches
+    scripts:
+      - name: Install Melos
+        script: |
+          dart pub global activate melos
+          echo "PATH=$PATH:$HOME/.pub-cache/bin" >> $CM_ENV
+
+      - name: Create secrets.dart stub
+        script: |
+          mkdir -p packages/shared/lib/config
+          printf '%s\n' \
+            'class AppSecrets {' \
+            '  AppSecrets._();' \
+            '  static const String gasBaseUrl   = "";' \
+            '  static const String gasSecretKey = "";' \
+            '  static const String geminiApiKey = "";' \
+            '}' \
+            > packages/shared/lib/config/secrets.dart
+
+      - name: Melos bootstrap
+        script: melos bootstrap
+
+      - name: Generate code (build_runner)
+        script: melos run generate
+
+      - name: Dart analyze
+        script: melos run analyze
+
+      - name: Format check
+        script: melos run format
+
+      - name: Run tests with coverage
+        script: melos run test
+
+      # Optional: upload merged coverage to Codecov. Requires the
+      # codecov_credentials group (CODECOV_TOKEN) — see migration guide.
+      # Mirrors the old `fail_ci_if_error: false` behaviour from GH Actions.
+      - name: Codecov upload
+        script: |
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -t "${CODECOV_TOKEN}"
+        ignore_failure: true
+
+    publishing:
+      email:
+        recipients:
+          - team@yourdomain.com # TODO: replace with your team's email(s)
+        notify:
+          success: false
+          failure: true
+
+
+  # ---------------------------------------------------------------------------
+  # TO Best — Android Release
+  # Triggered by pushing a tag matching v*.*.*-tobest (same convention as
+  # the old cd_tobest.yml). Builds, signs and releases the user-facing app.
+  # ---------------------------------------------------------------------------
+  tobest-android-release:
+    name: TO Best — Android Release
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      flutter: 3.24.5
+      java: 17
+      groups:
+        - app_secrets         # GAS_BASE_URL, GAS_SECRET_KEY, GEMINI_API_KEY
+        - github_credentials  # GITHUB_TOKEN (for the GitHub release step)
+      android_signing:
+        - tobest_keystore     # uploaded under Team settings > Code signing identities
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: 'v*.*.*-tobest'
+          include: true
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/.gradle/caches
+    scripts:
+      - name: Install Melos
+        script: |
+          dart pub global activate melos
+          echo "PATH=$PATH:$HOME/.pub-cache/bin" >> $CM_ENV
+
+      - name: Create secrets.dart from environment
+        script: |
+          mkdir -p packages/shared/lib/config
+          printf 'class AppSecrets {\n  AppSecrets._();\n  static const String gasBaseUrl   = "%s";\n  static const String gasSecretKey = "%s";\n  static const String geminiApiKey = "%s";\n}\n' \
+            "$GAS_BASE_URL" "$GAS_SECRET_KEY" "$GEMINI_API_KEY" \
+            > packages/shared/lib/config/secrets.dart
+
+      - name: Melos bootstrap
+        script: melos bootstrap
+
+      - name: Generate code (build_runner)
+        script: melos run generate
+
+      - name: Set up local.properties
+        script: echo "flutter.sdk=$FLUTTER_ROOT" > apps/tobest/android/local.properties
+
+      - name: Build release APK
+        script: |
+          cd apps/tobest
+          flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --build-name="${CM_TAG:-1.0.0}" \
+            --build-number="$BUILD_NUMBER"
+
+      - name: Rename APK
+        script: |
+          VERSION="${CM_TAG:-v1.0.0}"
+          cp apps/tobest/build/app/outputs/flutter-apk/app-release.apk \
+             "tobest-${VERSION}-build${BUILD_NUMBER}.apk"
+
+      # Drop-in replacement for the old "Create GitHub Release" step.
+      # Requires a GITHUB_TOKEN with repo write access (see migration guide).
+      - name: Publish GitHub release
+        script: |
+          if [ -z "${CM_TAG}" ]; then
+            echo "Not a tag build — skipping GitHub release"
+            exit 0
+          fi
+          gh release create "$CM_TAG" \
+            --title "TO Best ${CM_TAG}" \
+            --generate-notes \
+            tobest-*.apk
+
+    artifacts:
+      - tobest-*.apk
+      - apps/tobest/build/app/outputs/flutter-apk/*.apk
+
+    publishing:
+      email:
+        recipients:
+          - team@yourdomain.com # TODO: replace with your team's email(s)
+        notify:
+          success: true
+          failure: true
+
+      # Optional upgrade over GitHub Releases: distribute straight to
+      # testers' phones with install notifications and version history.
+      # Uncomment once you've created a Firebase project & Android app for
+      # TO Best, and added the firebase_credentials group. See migration guide.
+      # firebase:
+      #   firebase_service_account: $FIREBASE_SERVICE_ACCOUNT
+      #   android:
+      #     app_id: "1:XXXXXXXXXXXX:android:XXXXXXXXXXXXXXXXXXXXXX"
+      #     groups:
+      #       - tobest-testers
+
+
+  # ---------------------------------------------------------------------------
+  # Management — Android Release
+  # Triggered by pushing a tag matching v*.*.*-management (same convention
+  # as the old cd_management.yml). Builds, signs and releases the admin app.
+  # ---------------------------------------------------------------------------
+  management-android-release:
+    name: Management — Android Release
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      flutter: 3.24.5
+      java: 17
+      groups:
+        - app_secrets
+        - github_credentials
+      android_signing:
+        - management_keystore # uploaded under Team settings > Code signing identities
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: 'v*.*.*-management'
+          include: true
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/.gradle/caches
+    scripts:
+      - name: Install Melos
+        script: |
+          dart pub global activate melos
+          echo "PATH=$PATH:$HOME/.pub-cache/bin" >> $CM_ENV
+
+      - name: Create secrets.dart from environment
+        script: |
+          mkdir -p packages/shared/lib/config
+          printf 'class AppSecrets {\n  AppSecrets._();\n  static const String gasBaseUrl   = "%s";\n  static const String gasSecretKey = "%s";\n  static const String geminiApiKey = "%s";\n}\n' \
+            "$GAS_BASE_URL" "$GAS_SECRET_KEY" "$GEMINI_API_KEY" \
+            > packages/shared/lib/config/secrets.dart
+
+      - name: Melos bootstrap
+        script: melos bootstrap
+
+      - name: Generate code (build_runner)
+        script: melos run generate
+
+      - name: Set up local.properties
+        script: echo "flutter.sdk=$FLUTTER_ROOT" > apps/tobest_management/android/local.properties
+
+      - name: Build release APK
+        script: |
+          cd apps/tobest_management
+          flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --build-name="${CM_TAG:-1.0.0}" \
+            --build-number="$BUILD_NUMBER"
+
+      - name: Rename APK
+        script: |
+          VERSION="${CM_TAG:-v1.0.0}"
+          cp apps/tobest_management/build/app/outputs/flutter-apk/app-release.apk \
+             "management-${VERSION}-build${BUILD_NUMBER}.apk"
+
+      - name: Publish GitHub release
+        script: |
+          if [ -z "${CM_TAG}" ]; then
+            echo "Not a tag build — skipping GitHub release"
+            exit 0
+          fi
+          gh release create "$CM_TAG" \
+            --title "Management ${CM_TAG}" \
+            --generate-notes \
+            --prerelease \
+            management-*.apk
+
+    artifacts:
+      - management-*.apk
+      - apps/tobest_management/build/app/outputs/flutter-apk/*.apk
+
+    publishing:
+      email:
+        recipients:
+          - team@yourdomain.com # TODO: replace with your team's email(s)
+        notify:
+          success: true
+          failure: true
+
+      # Optional — see the tobest-android-release workflow above.
+      # firebase:
+      #   firebase_service_account: $FIREBASE_SERVICE_ACCOUNT
+      #   android:
+      #     app_id: "1:XXXXXXXXXXXX:android:XXXXXXXXXXXXXXXXXXXXXX"
+      #     groups:
+      #       - management-testers

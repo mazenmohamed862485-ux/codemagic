@@ -1,0 +1,54 @@
+name: tobest_monorepo
+
+packages:
+  - apps/**
+  - packages/**
+
+command:
+  bootstrap:
+    usePubspecOverrides: true
+
+scripts:
+  test:
+    run: melos exec -- flutter test --coverage
+    description: تشغيل الاختبارات في كل الحزم
+
+  analyze:
+    run: melos exec -- flutter analyze
+    description: تحليل الكود
+
+  lint:
+    run: melos exec -- dart analyze --fatal-infos
+    description: Lint صارم
+
+  format:
+    run: melos exec -- dart format --set-exit-if-changed .
+    description: فحص تنسيق الكود
+
+  format:fix:
+    run: melos exec -- dart format .
+    description: إصلاح تنسيق الكود تلقائياً
+
+  generate:
+    run: melos exec --depends-on="build_runner" -- dart run build_runner build --delete-conflicting-outputs
+    description: توليد الكود (drift + Riverpod)
+
+  generate:watch:
+    run: melos exec --depends-on="build_runner" -- dart run build_runner watch --delete-conflicting-outputs
+    description: توليد الكود بشكل مستمر
+
+  clean:
+    run: melos exec -- flutter clean
+    description: تنظيف مجلدات البناء
+
+  upgrade:
+    run: melos exec -- flutter pub upgrade
+    description: تحديث الـ packages
+
+  build:tobest:
+    run: cd apps/tobest && flutter build apk --release
+    description: بناء TO Best APK
+
+  build:management:
+    run: cd apps/tobest_management && flutter build apk --release
+    description: بناء Management APK
